@@ -11,7 +11,32 @@ python make_assets.py          # grass tile (+ a placeholder background if asset
 
 Libraries: OpenCV (`opencv-python`), LEGO Education (`legoeducation`), Ursina (3D engine, Panda3D based).
 
-## Look-and-feel spike
+## Playing
+
+```bash
+python make_tags.py            # once: writes the printable difficulty tags to assets/tags/
+python game.py                 # webcam; keys 1/2/3 also pick a difficulty
+python game.py --no-camera     # keys only
+```
+
+Flow: title screen -> **choose difficulty** (hold a printed AprilTag up to the camera for about a second)
+-> countdown 3, 2, 1 -> play. In play: `R` returns to the title, `Q` quits.
+
+| Tag | Difficulty | Ball speed |
+|-----|------------|-----------|
+| 1   | EASY       | 2.8 m/s   |
+| 2   | MEDIUM     | 3.6 m/s   |
+| 3   | HARD       | 4.8 m/s   |
+
+Print `assets/tags/difficulty_tags.pdf` (one tag per page) at 100% scale on white paper. Hold the tag
+roughly 0.5-1.5 m from the webcam, flat toward it, with decent light. Tags smaller than about 10 cm across the
+camera frame get unreliable. Tags are the 36h11 AprilTag family, detected with OpenCV's `cv2.aruco`.
+
+Code map: `config.py` (constants, difficulties), `physics.py` (pure game logic), `tags.py` (tag generation,
+detection, hold-to-select), `vision.py` (camera thread), `render.py` (the 3D scene, the only file that sets up
+Ursina), `ui.py` (title / choose / countdown / HUD), `game.py` (state machine).
+
+## Look-and-feel spike (original single-file prototype)
 
 ```bash
 python spike_ursina.py         # scripted rally; move the mouse to move/tilt the racket; q quits
