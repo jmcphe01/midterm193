@@ -17,7 +17,7 @@ from ursina.shader import Shader             # noqa: E402
 from ursina.shaders import lit_with_shadows_shader  # noqa: E402
 
 import config as cfg                         # noqa: E402
-from physics import Z_NEAR                   # noqa: E402
+from physics import Z_OPP_HIT                # noqa: E402
 
 ASSETS = Path(__file__).parent / "assets"
 
@@ -112,12 +112,19 @@ class World:
         # --- ball, racket, target ring ---
         self.ball = Entity(model="sphere", scale=T.BALL_R * 2, color=C(255, 150, 40))
         self.racket = Entity()
-        disc = Cylinder(32, start=0, height=1, direction=(0, 0, 1))      # axis along z: spans z 0..1
-        Entity(parent=self.racket, model=disc, origin_z=.5, scale=(0.2, 0.22, 0.018), color=C(215, 165, 105))  # rim
-        Entity(parent=self.racket, model=disc, origin_z=.5, scale=(0.17, 0.19, 0.026), color=C(205, 32, 48))    # faces
+        def disc():                                  # one mesh per part: origin_z edits the mesh in place, so sharing breaks it
+            return Cylinder(32, start=0, height=1, direction=(0, 0, 1))   # axis along z: spans z 0..1
+        Entity(parent=self.racket, model=disc(), origin_z=.5, scale=(0.2, 0.22, 0.018), color=C(215, 165, 105))  # rim
+        Entity(parent=self.racket, model=disc(), origin_z=.5, scale=(0.17, 0.19, 0.026), color=C(205, 32, 48))    # faces
         Entity(parent=self.racket, model="cube", scale=(0.03, 0.1, 0.016), y=-0.15, color=C(150, 110, 70))      # handle
         for part in self.racket.children:
             flat(part)                                                   # still casts its shadow on the grass
+        self.opp = Entity(position=(0, T.TABLE_H + 0.3, Z_OPP_HIT + 0.12))
+        Entity(parent=self.opp, model=disc(), origin_z=.5, scale=(0.2, 0.22, 0.018), color=C(215, 165, 105))
+        Entity(parent=self.opp, model=disc(), origin_z=.5, scale=(0.17, 0.19, 0.026), color=C(40, 90, 205))
+        Entity(parent=self.opp, model="cube", scale=(0.03, 0.1, 0.016), y=-0.15, color=C(150, 110, 70))
+        for part in self.opp.children:
+            flat(part)
         self.ring = flat(Entity(model=Circle(32, mode="line", thickness=3), scale=0.2,
                                 color=C(255, 255, 255, 190)))
         self.ring.setTransparency(True)
@@ -133,17 +140,28 @@ class World:
         camera.fov = 62
 
     # ---- things the game moves ----
-    def set_visible(self, ball=False, racket=False):
+    def set_visible(self, ball=False, racket=False, opponent=None):
         self.ball.enabled = ball
         self.racket.enabled = racket
+        self.opp.enabled = ball if opponent is None else opponent
         if not ball:
             self.ring.enabled = False
 
-    def place_ball(self, x, y, z):
+    def place_ball(self, x, y, z, pop=0.0):
+        """pop (0..1) briefly swells the ball, as hit feedback."""
         self.ball.position = (x, y, z)
+        self.ball.scale = cfg.BALL_R * 2 * (1 + 0.7 * pop)
+
+    def set_opponent(self, ball_x, ball_y, swing_age, dt):
+        """The opponent's racket tracks the ball and swings when it returns it."""
+        tx = clamp(ball_x, -0.9, 0.9)
+        ty = max(ball_y, cfg.TABLE_H + 0.2)
+        self.opp.x = lerp(self.opp.x, tx, min(1, 8 * dt))
+        self.opp.y = lerp(self.opp.y, ty, min(1, 8 * dt))
+        self.opp.rotation_x = 55 * max(0.0, 1 - swing_age / 0.22)
 
     def show_ring(self, x, y, scale):
-        self.ring.position = (x, y, Z_NEAR)
+        self.ring.position = (x, y, cfg.PLAYER_Z + 0.04)
         self.ring.scale = scale
         self.ring.enabled = True
 
@@ -160,14 +178,16 @@ class World:
         k = (plane_z - camera.z) / dz
         return camera.x + k * dx, camera.y + k * dy
 
-    def drive_racket(self, tx, ty, dt):
-        """Glide the racket toward (tx, ty) on the player plane, leaning into its own motion."""
+    def drive_racket(self, tx, ty, dt, swing_age=99.0):
+        """Glide the racket toward (tx, ty) on the player plane, leaning into its own motion. swing_age is the
+        time since the last swing: the blade snaps forward for a moment so the swing is visible."""
         target = Vec3(clamp(tx, -1.3, 1.3), clamp(ty, cfg.TABLE_H + 0.05, 2.2), cfg.PLAYER_Z)
         prev = Vec3(*self.racket.position)
         self.racket.position = lerp(self.racket.position, target, min(1, 20 * dt))
         self.racket_vel = lerp(self.racket_vel, (self.racket.position - prev) / max(dt, 1e-3), min(1, 12 * dt))
         v = self.racket_vel
-        self.racket.rotation = (clamp(-v.y * 14, -35, 35), clamp(v.x * 12, -35, 35), clamp(-v.x * 20, -45, 45))
+        self.racket.rotation = (clamp(-v.y * 14, -35, 35) - 50 * max(0.0, 1 - swing_age / 0.2),
+                                clamp(v.x * 12, -35, 35), clamp(-v.x * 20, -45, 45))
 
     def sway(self, t, amount):
         """Slow sideways camera drift for the menu screens (0 during play so mouse aiming stays exact)."""

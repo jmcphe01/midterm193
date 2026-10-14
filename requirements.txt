@@ -3,3 +3,11 @@ legoeducation==1.1.1
 ursina==7.0.0
 pillow>=10
 numpy<2
+# Pose tracking. These pins are the combination that works on Apple silicon: mediapipe 1.x dropped
+# mp.solutions and aborts on arm64; mediapipe 0.10.x needs numpy<2, which holds OpenCV back to 4.10.
+# mediapipe pulls in opencv-contrib-python, and ITS cv2 is the one imported, so pin it to opencv-python's version.
+mediapipe==0.10.21
+opencv-contrib-python==4.10.0.84
+scikit-learn==1.9.1
+joblib==1.6.0
+paho-mqtt>=2.0

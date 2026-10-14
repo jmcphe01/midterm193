@@ -1,12 +1,15 @@
 """Screens drawn on top of the scene: title, choose-difficulty, countdown, and the in-game HUD."""
+import cv2
 from PIL import Image as PILImage
 from panda3d.core import SamplerState, TransparencyAttrib
 
 from render import C, flat          # render first: it configures Ursina for macOS before Ursina is used
-from ursina import Entity, Text, Texture, camera, color
+from ursina import Entity, Text, Texture, Vec2, camera, color, window
 
 import config as cfg
+from control import CORNER_NAMES
 from tags import make_tag_image
+from vision import VIEW_SIZE
 
 TEXT_SHARPNESS = 5      # glyph-texture resolution multiplier (blur fix for large text)
 TEXT = C(255, 255, 255)
@@ -106,25 +109,88 @@ class UI:
         self.count_hint = Label("get ready!", -0.28, 2.4)
 
         self.hits = Label("0", 0.43, 4.2)
+        self.best = Label("", 0.36, 1.6, col=C(220, 228, 245))
         self.diff_tag = Label("", 0.47, 1.8, x=-0.72, origin=(-0.5, 0))
-        self.hint = Label("demo rally  -  R: back to title   Q: quit", -0.47, 1.1, x=-0.74, origin=(-0.5, 0))
+        self.hint = Label("hold the racket near the ring, then SWING (flick it, or press SPACE)  -  R: title  Q: quit",
+                          -0.47, 1.1, x=-0.74, origin=(-0.5, 0))
+
+        self.imu_status = Label("", 0.47, 1.1, x=0.74, origin=(0.5, 0), col=C(200, 212, 235))
+        self.mqtt_status = Label("", 0.435, 1.1, x=0.74, origin=(0.5, 0), col=C(200, 212, 235))
+        self.swing_flash = Label("", -0.40, 3.0, col=ACCENT)
+        self._swing_until = 0.0
+
+        self.over_head = Label("GAME OVER", 0.20, 7.5, col=ACCENT)
+        self.over_reason = Label("", 0.07, 2.4)
+        self.over_score = Label("", -0.06, 4.2)
+        self.over_best = Label("", -0.17, 2.4, col=C(220, 228, 245))
+        self.over_hint = Label("press SPACE to play again", -0.36, 1.5, col=C(220, 228, 245))
+
+        # live camera preview: one texture, shown big while calibrating and small in the corner during play
+        self._view_tex = Texture(PILImage.new("RGBA", VIEW_SIZE, (30, 34, 44, 255)))
+        self.view_frame = _panel(0.98, 0.56, -0.12, -0.04, C(8, 12, 28, 235), z=1.5)
+        self.view_big = flat(Entity(parent=camera.ui, model="quad", texture=self._view_tex, scale=(0.96, 0.54),
+                                    x=-0.12, y=-0.04, z=1, color=color.white))
+        self.small_frame = _panel(0.42, 0.245, 0, 0, C(8, 12, 28, 235), z=1.5)
+        self.view_small = flat(Entity(parent=camera.ui, model="quad", texture=self._view_tex, scale=(0.40, 0.225),
+                                      z=1, color=color.white))
+        self._small_ok = False                       # the game turns the corner preview on when pose control is used
+
+        self.cal_head = Label("CALIBRATE", 0.43, 4.2, col=ACCENT)
+        self.cal_instr = Label("", 0.355, 1.7)
+        self.cal_bar_bg = _panel(0.60, 0.024, -0.12, -0.37, C(0, 0, 0, 170), z=1)
+        self.cal_bar = flat(Entity(parent=camera.ui, model="quad", origin=(-.5, 0), scale=(0.0001, 0.024),
+                                   x=-0.42, y=-0.37, z=0.5, color=C(90, 225, 130)))
+        self.cal_status = Label("", -0.43, 1.3, x=-0.12, col=C(220, 228, 245))
+        self.cal_diagram_label = Label("reach region", 0.19, 1.2, x=0.58, col=C(200, 212, 235))
+        self.cal_dots = []
+        for i, (dx, dy) in enumerate(((-0.08, 0.05), (0.08, 0.05), (0.08, -0.05), (-0.08, -0.05))):
+            self.cal_dots.append(_panel(0.04, 0.04, 0.58 + dx, 0.10 + dy, CARD, z=1))
 
         card_items = [self.bar_bg, self.bar, self.choose_head, self.choose_sub, self.status]
         for c in self.cards:
             card_items += list(c)
         self._groups = {
             "title": [self.dim, self.title, self.subtitle, self.skip],
-            "choose": [self.dim] + card_items,
-            "countdown": [self.count_label, self.count_diff, self.count_hint],
-            "play": [self.hits, self.diff_tag, self.hint],
+            "choose": [self.dim] + card_items + [self.imu_status, self.mqtt_status],
+            "countdown": [self.count_label, self.count_diff, self.count_hint, self.imu_status, self.mqtt_status],
+            "play": [self.hits, self.best, self.diff_tag, self.hint, self.imu_status, self.mqtt_status, self.swing_flash],
+            "gameover": [self.dim, self.over_head, self.over_reason, self.over_score, self.over_best, self.over_hint,
+                         self.mqtt_status],
+            "calibrate": [self.dim, self.view_frame, self.view_big, self.cal_head, self.cal_instr, self.cal_bar_bg,
+                          self.cal_bar, self.cal_status, self.cal_diagram_label] + self.cal_dots,
         }
         self._all = {id(i): i for g in self._groups.values() for i in g}.values()
+        self.state = "title"
         self.show("title")
 
     def show(self, state):
+        self.state = state
         on = {id(i) for i in self._groups[state]}
         for item in self._all:
             item.enabled = id(item) in on
+        self._apply_small_view()
+
+    def enable_corner_preview(self, on):
+        """Show the small camera preview in the bottom-right during countdown / play / game over."""
+        self._small_ok = on
+        self._apply_small_view()
+
+    def _apply_small_view(self):
+        on = self._small_ok and self.state in ("countdown", "play", "gameover")
+        self.view_small.enabled = self.small_frame.enabled = on
+        if on:
+            pos = window.bottom_right + Vec2(-0.225, 0.135)
+            self.view_small.position = (pos.x, pos.y, 1)
+            self.small_frame.position = (pos.x, pos.y, 1.5)
+
+    def set_view(self, bgr):
+        """Put a camera frame (BGR, already mirrored, VIEW_SIZE) on the preview quads."""
+        if bgr is None:
+            return
+        rgba = cv2.cvtColor(cv2.flip(bgr, 0), cv2.COLOR_BGR2BGRA)      # OpenGL textures start at the bottom row
+        self._view_tex._texture.setRamImageAs(rgba.tobytes(), "BGRA")
+        if self.view_small.enabled:
+            self._apply_small_view()                                  # follow the window corner if it was resized
 
     # ---- per-state updates ----
     def update_choose(self, candidate_tag, progress, status):
@@ -138,11 +204,46 @@ class UI:
         else:
             self.status.text = status
 
+    def set_imu_status(self, text):
+        self.imu_status.text = text
+
+    def set_mqtt_status(self, text):
+        self.mqtt_status.text = text
+
+    def flash_swing(self, text, now, seconds=0.8, ignored=False):
+        """Briefly show what the hub detected (e.g. '>> RIGHT swing'), or why a motion was ignored."""
+        self.swing_flash.text = text
+        self.swing_flash.color(C(255, 150, 120) if ignored else ACCENT)
+        self.swing_flash.scale(1.8 if ignored else 3.0)
+        self._swing_until = now + seconds
+
+    def tick(self, now):
+        if self.swing_flash.text and now > self._swing_until:
+            self.swing_flash.text = ""
+
+    def update_calibrate(self, index, progress, status):
+        """index = corners captured so far (0-4); progress = hold progress for the corner being captured."""
+        if index < 4:
+            self.cal_instr.text = f"reach to the {CORNER_NAMES[index]} of your comfortable range, then hold still"
+        else:
+            self.cal_instr.text = "got it!"
+        for i, dot in enumerate(self.cal_dots):
+            dot.texture = solid(CARD_ON if i < index else (ACCENT if i == index else CARD))
+        self.cal_bar.scale_x = max(0.0001, 0.60 * progress)
+        self.cal_status.text = status
+
     def set_countdown(self, text, difficulty_name, pop):
         self.count_label.text = text
         self.count_label.scale(16 * (1 + 0.45 * pop))
         self.count_diff.text = difficulty_name
 
-    def set_play(self, difficulty_name, hits):
+    def set_play(self, difficulty_name, streak, best):
         self.diff_tag.text = difficulty_name
-        self.hits.text = str(hits)
+        self.hits.text = str(streak)
+        self.best.text = f"best {best}" if best else ""
+
+    def set_gameover(self, reason, streak, best, new_record):
+        self.over_reason.text = reason
+        self.over_score.text = f"streak: {streak}"
+        self.over_best.text = "NEW RECORD!" if new_record else f"best: {best}"
+        self.over_best.color(ACCENT if new_record else C(220, 228, 245))

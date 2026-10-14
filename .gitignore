@@ -5,3 +5,6 @@ __pycache__/
 spike_shot.png
 burst_*.png
 shot_*.png
+calibration.json
+data/fake/
+record.json
